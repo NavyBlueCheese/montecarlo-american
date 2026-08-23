@@ -18,6 +18,9 @@ directly
 
 ## Using the live visualization (in process)
 
+[**live site**]([https://example.com](https://navybluecheese.github.io/montecarlo-american/)) 
+
+
 - Adjust spot price, strike, volatility, and the number of simulated
   paths with the sliders, and switch between an American put and an
   American call on a dividend-paying stock.
