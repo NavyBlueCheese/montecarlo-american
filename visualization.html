@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>American Option Simulation</title>
+<style>
+  body {
+    background: #ffffff;
+    color: #000000;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 15px;
+    margin: 20px;
+  }
+
+  #price-line {
+    font-size: 22px;
+    margin-bottom: 12px;
+  }
+
+  canvas {
+    width: 100%;
+    height: 700px;
+    display: block;
+    border: 1px solid #cccccc;
+  }
+
+  .controls {
+    margin-top: 20px;
+  }
+
+  .row {
+    margin-bottom: 12px;
+  }
+
+  .row label {
+    display: inline-block;
+    width: 160px;
+  }
+
+  select, button {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 15px;
+  }
+
+  button {
+    padding: 6px 16px;
+    margin-top: 6px;
+  }
+
+  .note {
+    margin-top: 14px;
+    color: #333333;
+  }
+</style>
+</head>
+<body>
+
+<div id="price-line">Price: not run yet</div>
+<div id="status-line" class="note">0 of 0 paths</div>
+
+<canvas id="chart"></canvas>
+
+<div class="controls">
+  <div class="row">
+    <label for="s0">Spot price</label>
+    <input type="range" id="s0" min="60" max="140" value="100" step="1" />
+    <span id="s0-val">100</span>
+  </div>
+  <div class="row">
+    <label for="k">Strike</label>
+    <input type="range" id="k" min="60" max="140" value="100" step="1" />
+    <span id="k-val">100</span>
+  </div>
+  <div class="row">
+    <label for="sigma">Volatility</label>
+    <input type="range" id="sigma" min="5" max="60" value="20" step="1" />
+    <span id="sigma-val">20</span>%
+  </div>
+  <div class="row">
+    <label for="npaths">Number of paths</label>
+    <input type="range" id="npaths" min="20" max="300" value="120" step="10" />
+    <span id="npaths-val">120</span>
+  </div>
+  <div class="row">
+    <label for="opt-type">Contract</label>
+    <select id="opt-type">
+      <option value="put">American put, no dividend</option>
+      <option value="call">American call, 5% dividend</option>
+    </select>
+  </div>
+  <button id="run-btn">Run simulation</button>
+  <div class="note">Blue lines are held to expiry. Orange lines are exercised early. Dashed line is the strike.</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  function randn() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+  }
+
+  function simulateGBM(s0, r, sigma, T, nSteps, nPaths, q) {
+    const dt = T / nSteps;
+    const drift = (r - q - 0.5 * sigma * sigma) * dt;
+    const vol = sigma * Math.sqrt(dt);
+    const paths = new Array(nPaths);
+    for (let p = 0; p < nPaths; p++) {
+      const row = new Float64Array(nSteps + 1);
+      row[0] = s0;
+      let logS = Math.log(s0);
+      for (let i = 1; i <= nSteps; i++) {
+        logS += drift + vol * randn();
+        row[i] = Math.exp(logS);
+      }
+      paths[p] = row;
+    }
+    return paths;
+  }
+
+  function payoff(s, k, type) {
+    return type === "put" ? Math.max(k - s, 0) : Math.max(s - k, 0);
+  }
+
+  function solveLstsq(X, y, ridge) {
+    const n = X.length, d = X[0].length;
+    const A = Array.from({ length: d }, () => new Float64Array(d));
+    const b = new Float64Array(d);
+    for (let i = 0; i < n; i++) {
+      for (let a = 0; a < d; a++) {
+        b[a] += X[i][a] * y[i];
+        for (let c = 0; c < d; c++) A[a][c] += X[i][a] * X[i][c];
+      }
+    }
+    for (let a = 0; a < d; a++) A[a][a] += ridge;
+
+    for (let col = 0; col < d; col++) {
+      let pivot = col;
+      for (let row = col + 1; row < d; row++) {
+        if (Math.abs(A[row][col]) > Math.abs(A[pivot][col])) pivot = row;
+      }
+      const tmpA = A[col]; A[col] = A[pivot]; A[pivot] = tmpA;
+      const tmpB = b[col]; b[col] = b[pivot]; b[pivot] = tmpB;
+      for (let row = col + 1; row < d; row++) {
+        const factor = A[row][col] / A[col][col];
+        for (let c = col; c < d; c++) A[row][c] -= factor * A[col][c];
+        b[row] -= factor * b[col];
+      }
+    }
+    const coeffs = new Float64Array(d);
+    for (let row = d - 1; row >= 0; row--) {
+      let sum = b[row];
+      for (let c = row + 1; c < d; c++) sum -= A[row][c] * coeffs[c];
+      coeffs[row] = sum / A[row][row];
+    }
+    return coeffs;
+  }
+
+  function lsmPrice(params) {
+    const { s0, k, r, sigma, T, type, nPaths, nSteps, degree, q } = params;
+    const paths = simulateGBM(s0, r, sigma, T, nSteps, nPaths, q);
+    const dt = T / nSteps;
+    const disc1 = Math.exp(-r * dt);
+
+    const cashFlow = new Float64Array(nPaths);
+    const exerciseStep = new Int32Array(nPaths).fill(nSteps);
+    for (let p = 0; p < nPaths; p++) cashFlow[p] = payoff(paths[p][nSteps], k, type);
+
+    for (let i = nSteps - 1; i >= 1; i--) {
+      const itmIdx = [];
+      for (let p = 0; p < nPaths; p++) {
+        if (payoff(paths[p][i], k, type) > 0) itmIdx.push(p);
+      }
+      if (itmIdx.length < degree + 2) continue;
+
+      const X = [], y = [];
+      for (const p of itmIdx) {
+        const sNorm = paths[p][i] / s0;
+        const row = [];
+        let sp = 1;
+        for (let dgr = 0; dgr <= degree; dgr++) { row.push(sp); sp *= sNorm; }
+        X.push(row);
+        const stepsAhead = exerciseStep[p] - i;
+        y.push(cashFlow[p] * Math.pow(disc1, stepsAhead));
+      }
+      const coeffs = solveLstsq(X, y, 1e-10);
+
+      for (let idx = 0; idx < itmIdx.length; idx++) {
+        const p = itmIdx[idx];
+        const s = paths[p][i];
+        const sNorm = s / s0;
+        let cont = 0, sp = 1;
+        for (let dgr = 0; dgr <= degree; dgr++) { cont += coeffs[dgr] * sp; sp *= sNorm; }
+        const exVal = payoff(s, k, type);
+        if (exVal > cont) {
+          cashFlow[p] = exVal;
+          exerciseStep[p] = i;
+        }
+      }
+    }
+
+    const discounted = new Float64Array(nPaths);
+    for (let p = 0; p < nPaths; p++) {
+      discounted[p] = cashFlow[p] * Math.exp(-r * dt * exerciseStep[p]);
+    }
+
+    return { paths, exerciseStep, discounted, dt, nSteps, nPaths, k };
+  }
+
+  const canvas = document.getElementById("chart");
+  const ctx = canvas.getContext("2d");
+
+  function sizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w: rect.width, h: rect.height };
+  }
+
+  function drawFrame(result, revealFraction) {
+    const { w, h } = sizeCanvas();
+    const padL = 50, padR = 20, padT = 20, padB = 30;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+
+    ctx.clearRect(0, 0, w, h);
+
+    let pMin = Infinity, pMax = -Infinity;
+    for (const row of result.paths) {
+      for (let i = 0; i < row.length; i++) {
+        if (row[i] < pMin) pMin = row[i];
+        if (row[i] > pMax) pMax = row[i];
+      }
+    }
+    const pad = (pMax - pMin) * 0.08 || 5;
+    pMin -= pad; pMax += pad;
+
+    const xAt = (step) => padL + (step / result.nSteps) * plotW;
+    const yAt = (price) => padT + plotH - ((price - pMin) / (pMax - pMin)) * plotH;
+
+    ctx.strokeStyle = "#e6e6e6";
+    ctx.lineWidth = 1;
+    ctx.font = "13px Arial, sans-serif";
+    ctx.fillStyle = "#666666";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    const yTicks = 5;
+    for (let t = 0; t <= yTicks; t++) {
+      const price = pMin + (t / yTicks) * (pMax - pMin);
+      const y = yAt(price);
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(w - padR, y);
+      ctx.stroke();
+      ctx.fillText(price.toFixed(0), padL - 8, y);
+    }
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const xTicks = 4;
+    for (let t = 0; t <= xTicks; t++) {
+      const step = (t / xTicks) * result.nSteps;
+      const x = xAt(step);
+      const yrs = (step / result.nSteps).toFixed(2);
+      ctx.fillText(yrs + " yr", x, h - padB + 8);
+    }
+
+    const kY = yAt(result.k);
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = "#999999";
+    ctx.beginPath();
+    ctx.moveTo(padL, kY);
+    ctx.lineTo(w - padR, kY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const heldColor = "#3366cc";
+    const earlyColor = "#e07b00";
+    const revealCount = Math.floor(result.nPaths * revealFraction);
+
+    for (let p = 0; p < revealCount; p++) {
+      const row = result.paths[p];
+      const exercised = result.exerciseStep[p] < result.nSteps;
+      ctx.strokeStyle = exercised ? earlyColor : heldColor;
+      ctx.globalAlpha = exercised ? 0.85 : 0.4;
+      ctx.lineWidth = exercised ? 1.4 : 1;
+      ctx.beginPath();
+      const lastStep = exercised ? result.exerciseStep[p] : result.nSteps;
+      for (let i = 0; i <= lastStep; i++) {
+        const x = xAt(i), y = yAt(row[i]);
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      if (exercised) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = earlyColor;
+        ctx.beginPath();
+        ctx.arc(xAt(lastStep), yAt(row[lastStep]), 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  const els = {
+    s0: document.getElementById("s0"),
+    k: document.getElementById("k"),
+    sigma: document.getElementById("sigma"),
+    npaths: document.getElementById("npaths"),
+    optType: document.getElementById("opt-type"),
+    s0val: document.getElementById("s0-val"),
+    kval: document.getElementById("k-val"),
+    sigmaval: document.getElementById("sigma-val"),
+    npathsval: document.getElementById("npaths-val"),
+    priceLine: document.getElementById("price-line"),
+    statusLine: document.getElementById("status-line"),
+    runBtn: document.getElementById("run-btn"),
+  };
+
+  function syncLabels() {
+    els.s0val.textContent = els.s0.value;
+    els.kval.textContent = els.k.value;
+    els.sigmaval.textContent = els.sigma.value;
+    els.npathsval.textContent = els.npaths.value;
+  }
+  [els.s0, els.k, els.sigma, els.npaths].forEach((el) => el.addEventListener("input", syncLabels));
+  syncLabels();
+
+  let animId = null;
+
+  function runSimulation() {
+    if (animId) cancelAnimationFrame(animId);
+
+    const type = els.optType.value;
+    const params = {
+      s0: Number(els.s0.value),
+      k: Number(els.k.value),
+      r: 0.06,
+      sigma: Number(els.sigma.value) / 100,
+      T: 1.0,
+      type: type,
+      nPaths: Number(els.npaths.value),
+      nSteps: 50,
+      degree: 3,
+      q: type === "call" ? 0.05 : 0.0,
+    };
+
+    els.priceLine.textContent = "Price: computing";
+    els.statusLine.textContent = "0 of " + params.nPaths + " paths";
+
+    setTimeout(() => {
+      const result = lsmPrice(params);
+      animateReveal(result);
+    }, 20);
+  }
+
+  function animateReveal(result) {
+    const nBatches = Math.min(40, result.nPaths);
+    const batchSize = Math.ceil(result.nPaths / nBatches);
+    let batchesDone = 0;
+    let cumSum = 0, cumN = 0;
+
+    const batchDurationMs = 90;
+    let batchStart = performance.now();
+
+    function step(now) {
+      const elapsed = now - batchStart;
+      const withinBatchFrac = Math.min(1, elapsed / batchDurationMs);
+      const pathsShownInThisBatch = batchesDone * batchSize +
+        Math.floor(withinBatchFrac * Math.min(batchSize, result.nPaths - batchesDone * batchSize));
+      const revealFraction = Math.min(1, pathsShownInThisBatch / result.nPaths);
+
+      drawFrame(result, revealFraction);
+
+      if (withinBatchFrac >= 1) {
+        const startIdx = batchesDone * batchSize;
+        const endIdx = Math.min(result.nPaths, startIdx + batchSize);
+        for (let p = startIdx; p < endIdx; p++) {
+          cumSum += result.discounted[p];
+          cumN++;
+        }
+        const mean = cumN > 0 ? cumSum / cumN : 0;
+
+        els.priceLine.textContent = "Price: " + mean.toFixed(4);
+        els.statusLine.textContent = cumN + " of " + result.nPaths + " paths";
+
+        batchesDone++;
+        batchStart = now;
+      }
+
+      if (batchesDone < nBatches) {
+        animId = requestAnimationFrame(step);
+      } else {
+        drawFrame(result, 1);
+        animId = null;
+      }
+    }
+
+    animId = requestAnimationFrame(step);
+  }
+
+  els.runBtn.addEventListener("click", runSimulation);
+  window.addEventListener("resize", () => sizeCanvas());
+
+  sizeCanvas();
+  runSimulation();
+})();
+</script>
+
+</body>
+</html>
