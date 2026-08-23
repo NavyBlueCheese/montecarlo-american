@@ -18,7 +18,7 @@ directly
 
 ## Using the live visualization (in process)
 
-[live site]([https://example.com](https://navybluecheese.github.io/montecarlo-american/)) 
+[live site](https://example.com](https://navybluecheese.github.io/montecarlo-american/) 
 
 
 - Adjust spot price, strike, volatility, and the number of simulated
