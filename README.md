@@ -12,7 +12,7 @@ exercise now or keep holding. Holding is only the right choice if the
 continuation value the expected value of holding on is higher than
 what you'd get by exercising immediately. 
 
->> continuation value depends on the future and forward simulation alone doesn't give you that
+> continuation value depends on the future and forward simulation alone doesn't give you that
 directly
 
 
