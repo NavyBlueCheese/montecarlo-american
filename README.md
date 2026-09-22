@@ -1,7 +1,5 @@
 # Monte Carlo Pricing of an American Option (Longstaff–Schwartz)
 
-## American options actually need more than plain Monte Carlo
-
 Plain Monte Carlo prices a European option by simulating many random
 paths of the stock price out to expiry, computing the payoff at that one
 fixed date on each path, discounting it back to today (European option can only be exercised at expiry)
