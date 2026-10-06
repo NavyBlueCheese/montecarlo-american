@@ -14,17 +14,6 @@ what you'd get by exercising immediately.
 directly
 
 
-## Using the live visualization (in process)
+## live visualization (in process)
 
 [live site](https://navybluecheese.github.io/montecarlo-american/) 
-
-
-- Adjust spot price, strike, volatility, and the number of simulated
-  paths with the sliders, and switch between an American put and an
-  American call on a dividend-paying stock.
-- Click Run simulation. Paths are simulated and priced
-  then showed on the chart in batches from left to right. The price readout in the header updates after each
-  batch completes
-- Once the exercise decision is known, paths are colored by outcome:
-  blue for held to expiry, and amber (with a marker dot) for exercised early
-- The dashed horizontal line is the strike.
